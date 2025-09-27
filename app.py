@@ -282,34 +282,30 @@ def embed_image_pdf(pdf: FPDF, img_path: str, placement: str):
 def render_pdf(book_title: str, lang: str, level_key: str, stories: List[Dict], show_romanization: bool,
                image_paths: List[Optional[str]], img_placement: str) -> bytes:
     pdf = ReaderPDF()
-    register_unicode_font(pdf)  # FIX: ensure Unicode font before any text ops
+    register_unicode_font(pdf)  # ensure Unicode font before any text ops
     pdf.book_title = book_title
     pdf.set_auto_page_break(auto=True, margin=15)
 
     # Title
     pdf.add_page()
     pdf.set_font(PDF_FONT_NAME, "B", 20)
-    pdf.cell(0, 12, book_title, new_x=None, new_y=None, align="")
-    pdf.ln(12)
+    pdf.cell(0, 12, book_title, ln=1)         # ← use ln instead of new_x/new_y
     pdf.set_font(PDF_FONT_NAME, "", 12)
-    # FIX: ASCII divider to avoid '•'
-    pdf.multi_cell(0, 8, f"Language: {lang} - Level: {level_key} - Topic: {book_title.split(' - ')[-1] if ' - ' in book_title else ''}")
+    pdf.multi_cell(0, 8, f"Language: {lang} - Level: {level_key}")
+    pdf.ln(4)
 
     # TOC
-    pdf.ln(4)
     pdf.set_font(PDF_FONT_NAME, "B", 14)
-    pdf.cell(0, 10, "Contents", new_x=None, new_y=None, align="")
-    pdf.ln(10)
+    pdf.cell(0, 10, "Contents", ln=1)         # ← ln=1
     pdf.set_font(PDF_FONT_NAME, "", 12)
     for i, s in enumerate(stories, 1):
-        pdf.cell(0, 8, f"{i}. {s['title']}", new_x=None, new_y=None, align="")
-        pdf.ln(8)
+        pdf.cell(0, 8, f"{i}. {s['title']}", ln=1)  # ← ln=1
 
     # Stories
     for i, story in enumerate(stories, 1):
         pdf.add_page()
         pdf.set_font(PDF_FONT_NAME, "B", 16)
-        pdf.cell(0, 10, f"{i}. {story['title']}", new_x=None, new_y=None, align="")
+        pdf.cell(0, 10, f"{i}. {story['title']}", ln=1)  # ← ln=1
         pdf.ln(2)
 
         if image_paths and image_paths[i-1]:
@@ -331,8 +327,7 @@ def render_pdf(book_title: str, lang: str, level_key: str, stories: List[Dict], 
         if story["glossary"]:
             pdf.ln(2)
             pdf.set_font(PDF_FONT_NAME, "B", 13)
-            pdf.cell(0, 9, "Vocabulary", new_x=None, new_y=None, align="")
-            pdf.ln(9)
+            pdf.cell(0, 9, "Vocabulary", ln=1)        # ← ln=1
             pdf.set_font(PDF_FONT_NAME, "", 12)
             for g in story["glossary"]:
                 line = g["term"]
@@ -342,14 +337,12 @@ def render_pdf(book_title: str, lang: str, level_key: str, stories: List[Dict], 
                     line += f" ({g['pos']})"
                 if g.get("en"):
                     line += f": {g['en']}"
-                # Use ASCII bullet to avoid fancy glyph issues if fonts missing
                 pdf.multi_cell(0, 6, "- " + line)
 
         if story["grammar_note"].get("point"):
             pdf.ln(2)
             pdf.set_font(PDF_FONT_NAME, "B", 13)
-            pdf.cell(0, 9, "Grammar note", new_x=None, new_y=None, align="")
-            pdf.ln(9)
+            pdf.cell(0, 9, "Grammar note", ln=1)      # ← ln=1
             pdf.set_font(PDF_FONT_NAME, "", 12)
             pdf.multi_cell(0, 6, story["grammar_note"]["point"])
             for ex in story["grammar_note"].get("examples", []):
@@ -358,8 +351,7 @@ def render_pdf(book_title: str, lang: str, level_key: str, stories: List[Dict], 
         if story["questions"]:
             pdf.ln(2)
             pdf.set_font(PDF_FONT_NAME, "B", 13)
-            pdf.cell(0, 9, "Comprehension", new_x=None, new_y=None, align="")
-            pdf.ln(9)
+            pdf.cell(0, 9, "Comprehension", ln=1)     # ← ln=1
             pdf.set_font(PDF_FONT_NAME, "", 12)
             for q in story["questions"]:
                 if q["type"] == "tf":
@@ -369,7 +361,6 @@ def render_pdf(book_title: str, lang: str, level_key: str, stories: List[Dict], 
                     for opt in q.get("options", []):
                         pdf.multi_cell(0, 6, f"   * {opt}")
 
-    # Return as bytes (fpdf2 returns str; encode to latin1-safe bytes)
     return pdf.output(dest="S").encode("latin1")
 
 # =========================
