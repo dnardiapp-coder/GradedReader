@@ -1,16 +1,13 @@
 import os
 import io
 import json
-import math
 import base64
 import zipfile
-import tempfile
 from dataclasses import dataclass
 from typing import List, Dict, Tuple, Optional
 
 import streamlit as st
 from fpdf import FPDF
-from PIL import Image
 from openai import OpenAI
 
 # =========================
@@ -22,7 +19,6 @@ DEFAULT_TTS_VOICE = os.getenv("OPENAI_TTS_VOICE", "alloy")
 DEFAULT_AUDIO_FORMAT = "mp3"
 
 DEFAULT_TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", "gpt-4o-mini")     # optional story gen
-DEFAULT_IMAGE_MODEL = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1")   # auto images
 
 # --- Font paths (override via env or keep the defaults and place files in fonts/) ---
 FONT_DIR = os.getenv("FONT_DIR", "fonts")
@@ -31,7 +27,6 @@ FONT_CJK_PATH   = os.getenv("FONT_PATH_CJK",   os.path.join(FONT_DIR, "NotoSansS
 PDF_FONT_NAME   = "AppSans"   # single logical family we’ll use everywhere
 
 MAX_STORIES = 20
-MAX_IMG_WIDTH_PX = 1200
 
 # =========================
 # ====== LEVELS ==========
@@ -62,9 +57,6 @@ LEVELS: Dict[str, LevelProfile] = {
 # =========================
 # ===== UTILITIES =========
 # =========================
-
-def clamp(n: float, lo: float, hi: float) -> float:
-    return max(lo, min(n, hi))
 
 def tokens_len(s: str) -> int:
     return len(s.split())
@@ -193,7 +185,7 @@ def synthesize_tts_mp3(client: OpenAI, text: str, voice: str, model: str, fmt: s
         format=fmt,
     )
     if isinstance(resp, (bytes, bytearray)):
-        return resp
+        return bytes(resp)
     if hasattr(resp, "read"):
         return resp.read()
     if isinstance(resp, dict) and "data" in resp:
@@ -205,39 +197,6 @@ def synthesize_tts_mp3(client: OpenAI, text: str, voice: str, model: str, fmt: s
     except Exception:
         pass
     raise RuntimeError("Unexpected TTS response; update synthesize_tts_mp3 for your SDK version.")
-
-# =========================
-# ======= IMAGES ==========
-# =========================
-
-def resize_for_pdf(im: Image.Image, max_width_px: int = MAX_IMG_WIDTH_PX) -> Image.Image:
-    if im.width <= max_width_px:
-        return im
-    ratio = max_width_px / im.width
-    new_size = (int(im.width * ratio), int(im.height * ratio))
-    return im.resize(new_size, Image.LANCZOS)
-
-def save_temp_png(im: Image.Image) -> str:
-    f = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
-    im.save(f.name, format="PNG", optimize=True)
-    return f.name
-
-def generate_image_from_story(client: OpenAI, story_title: str, story_lines: list, style: str, seed_prompt: str, model: str) -> Image.Image:
-    scene = story_title + " — " + " ".join((ln.get("en") or ln.get("cn","")) for ln in story_lines[:6])
-    prompt = f"""{seed_prompt}
-Style: {style}.
-Scene summary: {scene}
-Content guidelines: clear, classroom-friendly, non-violent, inclusive, white/neutral background if illustration.
-"""
-    resp = client.images.generate(
-        model=model,
-        prompt=prompt,
-        size="1024x1024",
-        quality="high"  # valid values: low|medium|high|auto
-    )
-    b64 = resp.data[0].b64_json
-    img_bytes = base64.b64decode(b64)
-    return Image.open(io.BytesIO(img_bytes)).convert("RGB")
 
 # =========================
 # ====== PDF / FONTS ======
@@ -276,20 +235,7 @@ def register_unicode_font(pdf: FPDF):
         )
 
 
-def embed_image_pdf(pdf: FPDF, img_path: str, placement: str):
-    page_w = pdf.w - pdf.l_margin - pdf.r_margin
-    if placement.startswith("Full"):
-        pdf.image(img_path, x=pdf.l_margin, w=page_w)
-        pdf.ln(4)
-    else:
-        pdf.image(img_path, x=pdf.l_margin, w=page_w/2)
-        pdf.ln(2)
-    # Ensure the next text starts at left margin
-    pdf.set_x(pdf.l_margin)
-
-
-def render_pdf(book_title: str, lang: str, level_key: str, stories: List[Dict], show_romanization: bool,
-               image_paths: List[Optional[str]], img_placement: str) -> bytes:
+def render_pdf(book_title: str, lang: str, level_key: str, stories: List[Dict], show_romanization: bool) -> bytes:
     pdf = ReaderPDF()
     register_unicode_font(pdf)  # ensure Unicode font before any text ops
     pdf.book_title = book_title
@@ -317,9 +263,6 @@ def render_pdf(book_title: str, lang: str, level_key: str, stories: List[Dict], 
         pdf.set_font(PDF_FONT_NAME, "B", 16)
         pdf.cell(0, 10, f"{i}. {story['title']}", ln=1)
         pdf.ln(2)
-
-        if image_paths and image_paths[i-1]:
-            embed_image_pdf(pdf, image_paths[i-1], img_placement)
 
         pdf.set_font(PDF_FONT_NAME, "", 12)
         for line in story["story"]:
@@ -367,15 +310,17 @@ def render_pdf(book_title: str, lang: str, level_key: str, stories: List[Dict], 
                     for opt in q.get("options", []):
                         mc_full_width(pdf, f"   * {opt}", 6)
 
-    return pdf.output(dest="S").encode("latin1")
+    out = pdf.output(dest="S")
+    # fpdf2 may return bytes or bytearray depending on version
+    return bytes(out)
 
 # =========================
 # ===== STREAMLIT UI ======
 # =========================
 
-st.set_page_config(page_title="Graded Reader Builder (PDF + MP3 + Images)", page_icon="📘", layout="wide")
+st.set_page_config(page_title="Graded Reader Builder (PDF + MP3)", page_icon="📘", layout="wide")
 st.title("📘 Graded Reader Builder")
-st.caption("Create graded readers from beginner to advanced with audio and optional images.")
+st.caption("Create graded readers from beginner to advanced with audio.")
 
 with st.sidebar:
     st.header("Settings")
@@ -403,13 +348,6 @@ with st.sidebar:
     st.subheader("Audio (TTS)")
     voice = st.text_input("TTS Voice", DEFAULT_TTS_VOICE)
     tts_model = st.text_input("TTS Model", DEFAULT_TTS_MODEL)
-
-    st.subheader("Images")
-    img_mode = st.selectbox("Add images?", ["None", "Upload", "Auto-generate"], index=0)
-    img_placement = st.selectbox("Placement", ["Full width (banner)", "Inset (half width)"], index=0)
-    img_style = st.selectbox("Style (auto)", ["flat illustration", "watercolor", "manga", "photo-real", "minimal icon"], index=0)
-    img_seed_prompt = st.text_area("Image seed prompt", "An educational, friendly illustration that reinforces the story’s main scene.")
-    max_img_width_px = st.slider("Max image width (px)", 600, 1600, 1000)
 
     st.divider()
     st.markdown("**OpenAI API Key**")
@@ -460,41 +398,14 @@ if build_btn:
             story["title"] = f"{story['title']} ({idx+1})"
             stories.append(story)
 
-    # 2) Images
-    image_paths: List[Optional[str]] = [None] * n_stories
-    if img_mode == "Auto-generate":
-        if not client:
-            st.warning("Enter your OPENAI_API_KEY to auto-generate images.")
-        else:
-            with st.spinner("Generating images…"):
-                for i, s in enumerate(stories):
-                    try:
-                        im = generate_image_from_story(client, s["title"], s["story"], img_style, img_seed_prompt, DEFAULT_IMAGE_MODEL)
-                        im = resize_for_pdf(im, max_img_width_px)
-                        image_paths[i] = save_temp_png(im)
-                    except Exception as e:
-                        st.error(f"Image generation failed for story {i+1}: {e}")
-
-    elif img_mode == "Upload":
-        st.subheader("Upload images per story")
-        for i, s in enumerate(stories, 1):
-            up = st.file_uploader(f"Story {i}: {s['title']}", type=["png", "jpg", "jpeg"], key=f"up_{i}")
-            if up:
-                try:
-                    im = Image.open(up).convert("RGB")
-                    im = resize_for_pdf(im, max_img_width_px)
-                    image_paths[i-1] = save_temp_png(im)
-                except Exception as e:
-                    st.error(f"Could not process image for story {i}: {e}")
-
-    # 3) Render PDF
+    # 2) Render PDF (no images)
     with st.spinner("Rendering PDF…"):
         book_title = f"{lang} - {level_key} - {topic}"
-        pdf_bytes = render_pdf(book_title, lang, level_key, stories, show_romanization, image_paths, img_placement)
+        pdf_bytes = render_pdf(book_title, lang, level_key, stories, show_romanization)
     st.success("Text & PDF ready.")
     st.download_button("📕 Download PDF", data=pdf_bytes, file_name="graded_reader.pdf", mime="application/pdf")
 
-    # 4) TTS (MP3)
+    # 3) TTS (MP3)
     mp3_files: Dict[str, bytes] = {}
     if not client:
         st.warning("Enter your OPENAI_API_KEY to enable MP3 generation.")
@@ -516,7 +427,7 @@ if build_btn:
             zbytes = zip_bytes(mp3_files)
             st.download_button("🎧 Download MP3 ZIP", data=zbytes, file_name="audio_stories.zip", mime="application/zip")
 
-    # 5) Vocab export (stub)
+    # 4) Vocab export (stub)
     vocab_payload = {"note": "Plug in real vocab extraction if using a lexicon.", "stories": len(stories)}
     st.download_button(
         "🔤 Export Vocabulary (JSON)",
