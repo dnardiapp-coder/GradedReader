@@ -178,24 +178,37 @@ def try_generate_story_with_openai(client: OpenAI, lang: str, level_key: str, to
 # =========================
 
 def synthesize_tts_mp3(client: OpenAI, text: str, voice: str, model: str, fmt: str) -> bytes:
+    """
+    SDKs >= 1.8 use `audio.speech.create(model, voice, input)` and default to MP3.
+    Some versions don't accept a `format` kwarg. So we omit it.
+    """
     resp = client.audio.speech.create(
         model=model,
         voice=voice,
         input=text,
-        format=fmt,
     )
+    # Common return shapes across versions
     if isinstance(resp, (bytes, bytearray)):
         return bytes(resp)
     if hasattr(resp, "read"):
         return resp.read()
-    if isinstance(resp, dict) and "data" in resp:
-        return resp["data"]
+    # openai-python sometimes returns an object with `content` or `audio.data`
+    data = getattr(resp, "content", None)
+    if isinstance(data, (bytes, bytearray)):
+        return bytes(data)
     try:
         b64 = getattr(resp, "audio", {}).get("data", None)
         if b64:
             return base64.b64decode(b64)
     except Exception:
         pass
+    # Fallback: try dict-like
+    if isinstance(resp, dict):
+        if "data" in resp and isinstance(resp["data"], (bytes, bytearray)):
+            return bytes(resp["data"])
+        audio = resp.get("audio") if isinstance(resp.get("audio"), dict) else None
+        if audio and isinstance(audio.get("data"), str):
+            return base64.b64decode(audio["data"])
     raise RuntimeError("Unexpected TTS response; update synthesize_tts_mp3 for your SDK version.")
 
 # =========================
@@ -216,6 +229,27 @@ class ReaderPDF(FPDF):
 
 
 def register_unicode_font(pdf: FPDF):
+    """Register a Unicode-capable font family. Prefer CJK font if available.
+    Sets pdf._has_cjk to True/False so we can guard against missing Hanzi glyphs.
+    """
+    pdf._has_cjk = False
+    family_added = False
+    if os.path.exists(FONT_CJK_PATH):
+        pdf.add_font(PDF_FONT_NAME, style="", fname=FONT_CJK_PATH, uni=True)
+        pdf.add_font(PDF_FONT_NAME, style="B", fname=FONT_CJK_PATH, uni=True)
+        pdf.add_font(PDF_FONT_NAME, style="I", fname=FONT_CJK_PATH, uni=True)
+        family_added = True
+        pdf._has_cjk = True
+    if not family_added and os.path.exists(FONT_LATIN_PATH):
+        pdf.add_font(PDF_FONT_NAME, style="", fname=FONT_LATIN_PATH, uni=True)
+        pdf.add_font(PDF_FONT_NAME, style="B", fname=FONT_LATIN_PATH, uni=True)
+        pdf.add_font(PDF_FONT_NAME, style="I", fname=FONT_LATIN_PATH, uni=True)
+        family_added = True
+    if not family_added:
+        raise RuntimeError(
+            "No Unicode font found. Add a CJK font (e.g., NotoSansSC-Regular.otf/ttf) "
+            "or a Unicode Latin font (e.g., DejaVuSans.ttf) to fonts/ or set FONT_PATH_* env vars."
+        )
     """Register a Unicode-capable font family. Prefer CJK font if available."""
     family_added = False
     if os.path.exists(FONT_CJK_PATH):
@@ -238,6 +272,12 @@ def register_unicode_font(pdf: FPDF):
 def render_pdf(book_title: str, lang: str, level_key: str, stories: List[Dict], show_romanization: bool) -> bytes:
     pdf = ReaderPDF()
     register_unicode_font(pdf)  # ensure Unicode font before any text ops
+    # Guard: for Chinese/HSK we require a CJK font, otherwise Hanzi will be missing.
+    if ("Chinese" in lang or "HSK" in level_key) and not getattr(pdf, "_has_cjk", False):
+        raise RuntimeError(
+            "Chinese selected but no CJK font loaded. Place NotoSansSC-Regular.ttf/otf under fonts/ "
+            "or set FONT_PATH_CJK to its exact path, then redeploy."
+        )
     pdf.book_title = book_title
     pdf.set_auto_page_break(auto=True, margin=15)
 
@@ -266,11 +306,12 @@ def render_pdf(book_title: str, lang: str, level_key: str, stories: List[Dict], 
 
         pdf.set_font(PDF_FONT_NAME, "", 12)
         for line in story["story"]:
-            mc_full_width(pdf, line.get("cn",""), 7)
+            # Expect Hanzi in cn for Chinese; if not, still print whatever is present.
+            mc_full_width(pdf, line.get("cn", ""), 7)
             if show_romanization and line.get("romanization"):
-                mc_full_width(pdf, line["romanization"], 6, font_color=(100,100,100))
+                mc_full_width(pdf, line["romanization"], 6, font_color=(100, 100, 100))
             if line.get("en"):
-                mc_full_width(pdf, line["en"], 6, font_color=(80,80,80))
+                mc_full_width(pdf, line["en"], 6, font_color=(80, 80, 80))
             pdf.ln(1)
 
         if story["glossary"]:
@@ -279,7 +320,7 @@ def render_pdf(book_title: str, lang: str, level_key: str, stories: List[Dict], 
             pdf.cell(0, 9, "Vocabulary", ln=1)
             pdf.set_font(PDF_FONT_NAME, "", 12)
             for g in story["glossary"]:
-                line = g["term"]
+                line = g.get("term", "")
                 if show_romanization and g.get("romanization"):
                     line += f" [{g['romanization']}]"
                 if g.get("pos"):
@@ -311,7 +352,6 @@ def render_pdf(book_title: str, lang: str, level_key: str, stories: List[Dict], 
                         mc_full_width(pdf, f"   * {opt}", 6)
 
     out = pdf.output(dest="S")
-    # fpdf2 may return bytes or bytearray depending on version
     return bytes(out)
 
 # =========================
