@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.env
+.env.*
+# Streamlit
+.streamlit/
+# Artifacts
+*.pdf
+*.zip
+*.mp3
+*.m4a
+*.wav
+*.png
+*.jpg
+*.jpeg
+# OS/editor junk
+.DS_Store
+Thumbs.db
