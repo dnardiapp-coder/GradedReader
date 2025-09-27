@@ -11,14 +11,14 @@ from fpdf import FPDF
 from openai import OpenAI
 
 # =========================
-# ====== CONFIG ==========
+# ====== CONFIG ===========
 # =========================
 
-DEFAULT_TTS_MODEL = os.getenv("OPENAI_TTS_MODEL", "gpt-4o-mini-tts")   # or "tts-1"
+DEFAULT_TTS_MODEL = os.getenv("OPENAI_TTS_MODEL", "gpt-4o-mini-tts")  # or "tts-1"
 DEFAULT_TTS_VOICE = os.getenv("OPENAI_TTS_VOICE", "alloy")
-DEFAULT_AUDIO_FORMAT = "mp3"
+DEFAULT_AUDIO_FORMAT = "mp3"  # not passed to SDK (some versions reject the kwarg)
 
-DEFAULT_TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", "gpt-4o-mini")     # optional story gen
+DEFAULT_TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", "gpt-4o-mini")    # optional story gen
 
 # --- Font paths (override via env or keep the defaults and place files in fonts/) ---
 FONT_DIR = os.getenv("FONT_DIR", "fonts")
@@ -29,7 +29,7 @@ PDF_FONT_NAME   = "AppSans"   # single logical family we’ll use everywhere
 MAX_STORIES = 20
 
 # =========================
-# ====== LEVELS ==========
+# ====== LEVELS ===========
 # =========================
 
 @dataclass
@@ -71,6 +71,14 @@ def mc_full_width(pdf: FPDF, text: str, h: float, font_color: Optional[tuple] = 
     pdf.multi_cell(pdf.epw, h, text)
     if font_color:
         pdf.set_text_color(0, 0, 0)
+
+def compute_target_words(i: int, total: int, min_w: int, max_w: int, ramp: bool) -> int:
+    if not ramp or total == 1:
+        return (min_w + max_w) // 2
+    # gentle curve that increases across stories
+    t = i / (total - 1)
+    val = min_w + (max_w - min_w) * (t ** 1.4)
+    return int(val)
 
 # =========================
 # === PLACEHOLDER GEN =====
@@ -179,8 +187,7 @@ def try_generate_story_with_openai(client: OpenAI, lang: str, level_key: str, to
 
 def synthesize_tts_mp3(client: OpenAI, text: str, voice: str, model: str, fmt: str) -> bytes:
     """
-    SDKs >= 1.8 use `audio.speech.create(model, voice, input)` and default to MP3.
-    Some versions don't accept a `format` kwarg. So we omit it.
+    Some SDK versions reject a `format=` kwarg; MP3 is default. We omit it.
     """
     resp = client.audio.speech.create(
         model=model,
@@ -192,7 +199,6 @@ def synthesize_tts_mp3(client: OpenAI, text: str, voice: str, model: str, fmt: s
         return bytes(resp)
     if hasattr(resp, "read"):
         return resp.read()
-    # openai-python sometimes returns an object with `content` or `audio.data`
     data = getattr(resp, "content", None)
     if isinstance(data, (bytes, bytearray)):
         return bytes(data)
@@ -202,12 +208,11 @@ def synthesize_tts_mp3(client: OpenAI, text: str, voice: str, model: str, fmt: s
             return base64.b64decode(b64)
     except Exception:
         pass
-    # Fallback: try dict-like
     if isinstance(resp, dict):
         if "data" in resp and isinstance(resp["data"], (bytes, bytearray)):
             return bytes(resp["data"])
-        audio = resp.get("audio") if isinstance(resp.get("audio"), dict) else None
-        if audio and isinstance(audio.get("data"), str):
+        audio = resp.get("audio")
+        if isinstance(audio, dict) and isinstance(audio.get("data"), str):
             return base64.b64decode(audio["data"])
     raise RuntimeError("Unexpected TTS response; update synthesize_tts_mp3 for your SDK version.")
 
@@ -227,9 +232,9 @@ class ReaderPDF(FPDF):
         self.set_font(PDF_FONT_NAME, "", 9)
         self.cell(0, 8, f"{self.page_no()}", align="C")
 
-
 def register_unicode_font(pdf: FPDF):
-    """Register a Unicode-capable font family. Prefer CJK font if available.
+    """
+    Register a Unicode-capable font family. Prefer CJK font if available.
     Sets pdf._has_cjk to True/False so we can guard against missing Hanzi glyphs.
     """
     pdf._has_cjk = False
@@ -250,41 +255,25 @@ def register_unicode_font(pdf: FPDF):
             "No Unicode font found. Add a CJK font (e.g., NotoSansSC-Regular.otf/ttf) "
             "or a Unicode Latin font (e.g., DejaVuSans.ttf) to fonts/ or set FONT_PATH_* env vars."
         )
-    """Register a Unicode-capable font family. Prefer CJK font if available."""
-    family_added = False
-    if os.path.exists(FONT_CJK_PATH):
-        pdf.add_font(PDF_FONT_NAME, style="", fname=FONT_CJK_PATH, uni=True)
-        pdf.add_font(PDF_FONT_NAME, style="B", fname=FONT_CJK_PATH, uni=True)
-        pdf.add_font(PDF_FONT_NAME, style="I", fname=FONT_CJK_PATH, uni=True)
-        family_added = True
-    if not family_added and os.path.exists(FONT_LATIN_PATH):
-        pdf.add_font(PDF_FONT_NAME, style="", fname=FONT_LATIN_PATH, uni=True)
-        pdf.add_font(PDF_FONT_NAME, style="B", fname=FONT_LATIN_PATH, uni=True)
-        pdf.add_font(PDF_FONT_NAME, style="I", fname=FONT_LATIN_PATH, uni=True)
-        family_added = True
-    if not family_added:
-        raise RuntimeError(
-            "No Unicode font found. Add a CJK font (e.g., NotoSansSC-Regular.otf/ttf) "
-            "or a Unicode Latin font (e.g., DejaVuSans.ttf) to fonts/ or set FONT_PATH_* env vars."
-        )
-
 
 def render_pdf(book_title: str, lang: str, level_key: str, stories: List[Dict], show_romanization: bool) -> bytes:
     pdf = ReaderPDF()
     register_unicode_font(pdf)  # ensure Unicode font before any text ops
-    # Guard: for Chinese/HSK we require a CJK font, otherwise Hanzi will be missing.
-    if ("Chinese" in lang or "HSK" in level_key) and not getattr(pdf, "_has_cjk", False):
-        raise RuntimeError(
-            "Chinese selected but no CJK font loaded. Place NotoSansSC-Regular.ttf/otf under fonts/ "
-            "or set FONT_PATH_CJK to its exact path, then redeploy."
-        )
-    pdf.book_title = book_title
+
+    # Soft fallback: if Chinese is selected but no CJK font is loaded, append a warning to the title
+    cjk_required = ("Chinese" in lang or "HSK" in level_key)
+    cjk_ok = getattr(pdf, "_has_cjk", False)
+    if cjk_required and not cjk_ok:
+        pdf.book_title = f"{book_title}  [CJK font missing: hanzi may be blank]"
+    else:
+        pdf.book_title = book_title
+
     pdf.set_auto_page_break(auto=True, margin=15)
 
     # Title
     pdf.add_page()
     pdf.set_font(PDF_FONT_NAME, "B", 20)
-    pdf.cell(0, 12, book_title, ln=1)
+    pdf.cell(0, 12, pdf.book_title, ln=1)
     pdf.set_font(PDF_FONT_NAME, "", 12)
     mc_full_width(pdf, f"Language: {lang} - Level: {level_key}", 8)
     pdf.ln(4)
@@ -306,7 +295,6 @@ def render_pdf(book_title: str, lang: str, level_key: str, stories: List[Dict], 
 
         pdf.set_font(PDF_FONT_NAME, "", 12)
         for line in story["story"]:
-            # Expect Hanzi in cn for Chinese; if not, still print whatever is present.
             mc_full_width(pdf, line.get("cn", ""), 7)
             if show_romanization and line.get("romanization"):
                 mc_full_width(pdf, line["romanization"], 6, font_color=(100, 100, 100))
@@ -352,7 +340,7 @@ def render_pdf(book_title: str, lang: str, level_key: str, stories: List[Dict], 
                         mc_full_width(pdf, f"   * {opt}", 6)
 
     out = pdf.output(dest="S")
-    return bytes(out)
+    return bytes(out)  # normalize bytes/bytearray across fpdf2 versions
 
 # =========================
 # ===== STREAMLIT UI ======
@@ -360,13 +348,25 @@ def render_pdf(book_title: str, lang: str, level_key: str, stories: List[Dict], 
 
 st.set_page_config(page_title="Graded Reader Builder (PDF + MP3)", page_icon="📘", layout="wide")
 st.title("📘 Graded Reader Builder")
+
+# ---- Quick font status line (helps debug paths case-sensitively on Linux)
+def _font_status():
+    ok_cjk = os.path.exists(FONT_CJK_PATH)
+    ok_lat = os.path.exists(FONT_LATIN_PATH)
+    st.caption(
+        f"Font check — CJK: {'✅' if ok_cjk else '❌'} ({FONT_CJK_PATH}) | "
+        f"Latin: {'✅' if ok_lat else '❌'} ({FONT_LATIN_PATH})"
+    )
+
+_font_status()
 st.caption("Create graded readers from beginner to advanced with audio.")
 
 with st.sidebar:
     st.header("Settings")
-    lang = st.selectbox("Language", [
-        "Chinese (Simplified)", "Spanish", "French", "English", "German", "Portuguese"
-    ])
+    lang = st.selectbox(
+        "Language",
+        ["Chinese (Simplified)", "Spanish", "French", "English", "German", "Portuguese"]
+    )
     level_key = st.selectbox("Level", list(LEVELS.keys()), index=0)
 
     topic = st.text_input("Topic/Area", "Daily routine")
@@ -401,13 +401,6 @@ def get_openai_client(api_key: str):
         return None
     os.environ["OPENAI_API_KEY"] = api_key
     return OpenAI()
-
-def compute_target_words(i: int, total: int, min_w: int, max_w: int, ramp: bool) -> int:
-    if not ramp or total == 1:
-        return (min_w + max_w) // 2
-    t = i / (total - 1)
-    val = min_w + (max_w - min_w) * (t**1.4)
-    return int(val)
 
 def zip_bytes(mp3_map: Dict[str, bytes]) -> bytes:
     buf = io.BytesIO()
@@ -453,6 +446,8 @@ if build_btn:
         with st.spinner("Synthesizing audio…"):
             for i, s in enumerate(stories, 1):
                 cn_text = " ".join([ln.get("cn","") for ln in s["story"] if ln.get("cn")])
+                if not cn_text.strip():
+                    continue
                 try:
                     audio_bytes = synthesize_tts_mp3(client, cn_text, voice=voice, model=tts_model, fmt=DEFAULT_AUDIO_FORMAT)
                     mp3_files[f"story_{i:02d}_normal.mp3"] = audio_bytes
@@ -475,12 +470,3 @@ if build_btn:
         file_name="vocab.json",
         mime="application/json",
     )
-
-st.markdown(
-    """
-**Notes**
-- Place **Unicode fonts** in `fonts/` (`NotoSansSC-Regular.otf/ttf` for Chinese, `DejaVuSans.ttf` for Latin). Or set `FONT_PATH_CJK` / `FONT_PATH_LATIN`.
-- Turn on *Use OpenAI to generate stories* for fresh content (JSON mode).
-- Use the difficulty ramp to gradually increase words/story.
-"""
-)
