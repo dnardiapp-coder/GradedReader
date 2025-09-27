@@ -1,8 +1,10 @@
 import os
 import io
+import re
 import json
 import base64
 import zipfile
+import random
 from dataclasses import dataclass
 from typing import List, Dict, Tuple, Optional
 
@@ -18,12 +20,16 @@ DEFAULT_TTS_MODEL = os.getenv("OPENAI_TTS_MODEL", "gpt-4o-mini-tts")  # or "tts-
 DEFAULT_TTS_VOICE = os.getenv("OPENAI_TTS_VOICE", "alloy")
 DEFAULT_AUDIO_FORMAT = "mp3"  # not passed to SDK (some versions reject the kwarg)
 
-DEFAULT_TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", "gpt-4o-mini")    # optional story gen
+DEFAULT_TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", "gpt-4o-mini")    # story gen
 
 # --- Font paths (override via env or keep the defaults and place files in fonts/) ---
 FONT_DIR = os.getenv("FONT_DIR", "fonts")
 FONT_LATIN_PATH = os.getenv("FONT_PATH_LATIN", os.path.join(FONT_DIR, "DejaVuSans.ttf"))
-FONT_CJK_PATH   = os.getenv("FONT_PATH_CJK",   os.path.join(FONT_DIR, "NotoSansSC-Regular.otf"))
+FONT_CJK_PATH   = os.getenv("FONT_PATH_CJK",   os.path.join(FONT_DIR, "NotoSansSC-Regular.ttf"))  # try .ttf first
+if not os.path.exists(FONT_CJK_PATH):
+    # fallback to .otf if .ttf not present
+    FONT_CJK_PATH = os.getenv("FONT_PATH_CJK", os.path.join(FONT_DIR, "NotoSansSC-Regular.otf"))
+
 PDF_FONT_NAME   = "AppSans"   # single logical family we’ll use everywhere
 
 MAX_STORIES = 20
@@ -41,12 +47,12 @@ class LevelProfile:
     script: str
 
 LEVELS: Dict[str, LevelProfile] = {
-    "HSK1 (A1)":  LevelProfile("HSK1 (A1)",  (8, 24),  (0.02, 0.05), "pinyin", "hanzi"),
-    "HSK2 (A1+)": LevelProfile("HSK2 (A1+)", (10, 28), (0.03, 0.06), "pinyin", "hanzi"),
-    "HSK3 (A2)":  LevelProfile("HSK3 (A2)",  (12, 30), (0.03, 0.06), "pinyin", "hanzi"),
-    "HSK4 (B1)":  LevelProfile("HSK4 (B1)",  (14, 34), (0.03, 0.07), "none",   "hanzi"),
-    "HSK5 (B2)":  LevelProfile("HSK5 (B2)",  (16, 38), (0.03, 0.08), "none",   "hanzi"),
-    "HSK6 (C1)":  LevelProfile("HSK6 (C1)",  (18, 44), (0.03, 0.10), "none",   "hanzi"),
+    "HSK1 (A1)":  LevelProfile("HSK1 (A1)",  (6, 14),  (0.02, 0.05), "pinyin", "hanzi"),
+    "HSK2 (A1+)": LevelProfile("HSK2 (A1+)", (8, 18), (0.03, 0.06), "pinyin", "hanzi"),
+    "HSK3 (A2)":  LevelProfile("HSK3 (A2)",  (10, 22), (0.03, 0.06), "pinyin", "hanzi"),
+    "HSK4 (B1)":  LevelProfile("HSK4 (B1)",  (12, 26), (0.03, 0.07), "none",   "hanzi"),
+    "HSK5 (B2)":  LevelProfile("HSK5 (B2)",  (14, 30), (0.03, 0.08), "none",   "hanzi"),
+    "HSK6 (C1)":  LevelProfile("HSK6 (C1)",  (16, 34), (0.03, 0.10), "none",   "hanzi"),
     "CEFR A1":    LevelProfile("CEFR A1",    (8, 18),  (0.02, 0.05), "none", "alpha"),
     "CEFR A2":    LevelProfile("CEFR A2",    (10, 22), (0.03, 0.06), "none", "alpha"),
     "CEFR B1":    LevelProfile("CEFR B1",    (12, 26), (0.03, 0.07), "none", "alpha"),
@@ -61,9 +67,14 @@ LEVELS: Dict[str, LevelProfile] = {
 def tokens_len(s: str) -> int:
     return len(s.split())
 
-# A safe multi_cell that always uses the full effective page width (fpdf2: pdf.epw)
-# and resets X to left margin to avoid "Not enough horizontal space" errors.
+def compute_target_words(i: int, total: int, min_w: int, max_w: int, ramp: bool) -> int:
+    if not ramp or total == 1:
+        return (min_w + max_w) // 2
+    t = i / (total - 1)
+    val = min_w + (max_w - min_w) * (t ** 1.4)
+    return int(val)
 
+# Safe multi_cell: always full effective width; reset X to left margin
 def mc_full_width(pdf: FPDF, text: str, h: float, font_color: Optional[tuple] = None):
     if font_color:
         pdf.set_text_color(*font_color)
@@ -72,57 +83,69 @@ def mc_full_width(pdf: FPDF, text: str, h: float, font_color: Optional[tuple] = 
     if font_color:
         pdf.set_text_color(0, 0, 0)
 
-def compute_target_words(i: int, total: int, min_w: int, max_w: int, ramp: bool) -> int:
-    if not ramp or total == 1:
-        return (min_w + max_w) // 2
-    # gentle curve that increases across stories
-    t = i / (total - 1)
-    val = min_w + (max_w - min_w) * (t ** 1.4)
-    return int(val)
-
 # =========================
 # === PLACEHOLDER GEN =====
+# (Better HSK1-ish fallback so it doesn't look repetitive)
 # =========================
+
+BASIC_HSK1_LINES = [
+    {"cn":"早上好！","romanization":"Zǎoshang hǎo!","en":"Good morning!"},
+    {"cn":"我叫王明。","romanization":"Wǒ jiào Wáng Míng.","en":"My name is Wang Ming."},
+    {"cn":"她是我的朋友。","romanization":"Tā shì wǒ de péngyou.","en":"She is my friend."},
+    {"cn":"我们在学校。","romanization":"Wǒmen zài xuéxiào.","en":"We are at school."},
+    {"cn":"我学习中文。","romanization":"Wǒ xuéxí Zhōngwén.","en":"I study Chinese."},
+    {"cn":"今天天气很好。","romanization":"Jīntiān tiānqì hěn hǎo.","en":"The weather is nice today."},
+    {"cn":"我喜欢喝茶。","romanization":"Wǒ xǐhuān hē chá.","en":"I like to drink tea."},
+    {"cn":"这是我的老师。","romanization":"Zhè shì wǒ de lǎoshī.","en":"This is my teacher."},
+    {"cn":"我们一起走吧。","romanization":"Wǒmen yīqǐ zǒu ba.","en":"Let’s go together."},
+    {"cn":"他叫小李。","romanization":"Tā jiào Xiǎo Lǐ.","en":"He is Xiao Li."},
+    {"cn":"你喜欢吃米饭吗？","romanization":"Nǐ xǐhuān chī mǐfàn ma?","en":"Do you like to eat rice?"},
+    {"cn":"我不喜欢咖啡。","romanization":"Wǒ bù xǐhuān kāfēi.","en":"I don’t like coffee."},
+    {"cn":"我们在公园聊天。","romanization":"Wǒmen zài gōngyuán liáotiān.","en":"We chat in the park."},
+    {"cn":"现在几点？","romanization":"Xiànzài jǐ diǎn?","en":"What time is it now?"},
+    {"cn":"他今年二十岁。","romanization":"Tā jīnnián èrshí suì.","en":"He is twenty this year."},
+    {"cn":"我在看书。","romanization":"Wǒ zài kàn shū.","en":"I am reading."},
+    {"cn":"请坐。","romanization":"Qǐng zuò.","en":"Please sit."},
+    {"cn":"谢谢！","romanization":"Xièxie!","en":"Thanks!"},
+    {"cn":"不客气。","romanization":"Bú kèqi.","en":"You’re welcome."},
+    {"cn":"再见！","romanization":"Zàijiàn!","en":"Goodbye!"},
+]
 
 def placeholder_story(lang: str, level_key: str, topic: str, target_words: int, romanization_on: bool) -> Dict:
     if "Chinese" in lang or "HSK" in level_key:
-        lines = [
-            {"cn":"你好！你叫什么名字？","romanization":"Nǐ hǎo! Nǐ jiào shénme míngzi?","en":"Hello! What’s your name?"},
-            {"cn":"我叫李明。你呢？","romanization":"Wǒ jiào Lǐ Míng. Nǐ ne?","en":"I’m Li Ming. And you?"},
-            {"cn":"今天我们在公园见面，一边走一边聊天。","romanization":"Jīntiān wǒmen zài gōngyuán jiànmiàn, yībiān zǒu yībiān liáotiān.","en":"We meet in the park and talk while walking."},
-            {"cn":"天气很好，可是风不小，我们带了雨伞。","romanization":"Tiānqì hěn hǎo, kěshì fēng bù xiǎo, wǒmen dàile yǔsǎn.","en":"Nice weather, but windy; we brought umbrellas."},
-        ]
+        k = min(len(BASIC_HSK1_LINES), max(8, target_words // 8))
+        lines = random.sample(BASIC_HSK1_LINES, k=k)
+        # Add short dialogue to create a tiny arc
+        lines.insert(2, {"cn":"“你叫什么名字？”","romanization":"“Nǐ jiào shénme míngzi?”","en":"“What is your name?”"})
+        lines.insert(3, {"cn":"“我叫小李。”","romanization":"“Wǒ jiào Xiǎo Lǐ.”","en":"“I’m Xiao Li.”"})
         gloss = [
+            {"term":"名字","romanization":"míngzi","pos":"n.","en":"name"},
             {"term":"公园","romanization":"gōngyuán","pos":"n.","en":"park"},
             {"term":"聊天","romanization":"liáotiān","pos":"v.","en":"to chat"},
         ]
-        note = {"point":"一边…一边… (do two actions at once)","examples":["我一边走一边说话。","她一边听音乐一边做饭。"]}
-        qs = [{"type":"tf","q":"他们在公园见面。","answer":"T"}]
-    else:
-        lines = [
-            {"cn":"Hello! This is a placeholder line.","romanization":"","en":"Replace with generator."},
-            {"cn":"We are going to the park and talking.","romanization":"","en":"Replace with generator."},
-        ]
-        gloss, note, qs = [], {"point":"","examples":[]}, []
-
-    total = sum(tokens_len(l["cn"]) for l in lines)
-    i = 0
-    while total < target_words:
-        lines.append(lines[i % len(lines)])
-        total = sum(tokens_len(l["cn"]) for l in lines)
-        i += 1
-
+        note = {"point":"“吗”构成一般疑问句（Yes/No）。","examples":["你喜欢茶吗？","你是学生吗？"]}
+        qs = [{"type":"tf","q":"他们在公园聊天。","answer":"T"}]
+        if not romanization_on:
+            for l in lines:
+                l["romanization"] = ""
+            for g in gloss:
+                g["romanization"] = ""
+        return {
+            "title": f"{topic} ({level_key})",
+            "story": lines,
+            "glossary": gloss,
+            "grammar_note": note,
+            "questions": qs
+        }
+    # Non-Chinese fallback
+    lines = [
+        {"cn":"Hello! This is a placeholder line.","romanization":"","en":"Replace with generator."},
+        {"cn":"We go to the park and talk.","romanization":"","en":"Replace with generator."},
+    ]
     if not romanization_on:
         for l in lines:
             l["romanization"] = ""
-
-    return {
-        "title": f"{topic} ({level_key})",
-        "story": lines,
-        "glossary": gloss,
-        "grammar_note": note,
-        "questions": qs
-    }
+    return {"title": f"{topic} ({level_key})", "story": lines, "glossary": [], "grammar_note": {"point":"", "examples":[]}, "questions": []}
 
 # =========================
 # ==== AI GENERATION ======
@@ -131,27 +154,60 @@ def placeholder_story(lang: str, level_key: str, topic: str, target_words: int, 
 def build_story_json_system_prompt(lang: str, level: LevelProfile, romanization_on: bool, topic: str, subtopics: List[str], target_words: int) -> str:
     ro = "ON" if romanization_on else "OFF"
     subs = ", ".join(subtopics) if subtopics else "None"
-    return f"""You are a graded-reader author.
-Language: {lang}. Level: {level.name}. Romanization: {ro}.
-Topic: {topic}. Subtopics: {subs}.
-Target words per story: {target_words}.
-Constraints:
-- Keep the story within ±10% of target words.
-- Use short, natural sentences appropriate for {level.name}.
-- Recycle vocabulary; new-word rate ≈ {int(level.new_word_pct[0]*100)}–{int(level.new_word_pct[1]*100)}%.
-- Include brief, realistic dialogue (2–4 lines).
-- Include a mini plot (setup → small problem → resolution).
-- If Chinese: prefer high-frequency words; if romanization is OFF, omit pinyin.
+    return f"""
+You are writing an HSK-style graded reader story.
 
-Return valid JSON only with keys:
+LANGUAGE: {lang}
+LEVEL: {level.name}  (HSK1 ≈ 150 words; very simple sentences)
+ROMANIZATION: {ro}
+TOPIC: {topic}
+SUBTOPICS: {subs}
+TARGET_WORDS: {target_words} (±10%)
+
+MANDATORY FORMAT (valid JSON only):
 {{
- "title": "string",
- "story": [{{"cn":"string","romanization":"string (optional)","en":"string"}}],
- "glossary": [{{"term":"string","romanization":"string (optional)","pos":"string","en":"string"}}],
- "grammar_note": {{"point":"string","examples":["string","string"]}},
- "questions": [{{"type":"tf|mc","q":"string","options":["string","string"],"answer":"string"}}]
+  "title": "string",
+  "story": [
+    {{"cn": "Hanzi line (must contain Chinese characters)",
+      "romanization": "Pinyin for that line (omit the field entirely if ROMANIZATION is OFF)",
+      "en": "Natural English translation"
+    }}
+  ],
+  "glossary": [
+    {{"term": "Hanzi word", "romanization": "pinyin (omit if OFF)", "pos": "n./v./adj.", "en": "meaning"}}
+  ],
+  "grammar_note": {{"point": "one short HSK1 pattern", "examples": ["example 1", "example 2"]}},
+  "questions": [
+    {{"type": "tf", "q": "True/False question", "answer": "T"}},
+    {{"type": "mc", "q": "One multiple-choice question", "options": ["A", "B", "C"], "answer": "A"}}
+  ]
 }}
-    """
+
+STYLE CONSTRAINTS:
+- HSK1 only: very short, concrete sentences; everyday verbs and nouns.
+- Each story MUST include real Hanzi in "cn" (no pinyin-only lines).
+- If ROMANIZATION is OFF, do NOT include the "romanization" field at all.
+- Recycle HSK1-range words; new-word rate about {int(level.new_word_pct[0]*100)}–{int(level.new_word_pct[1]*100)}%.
+- Mini-plot: setup → small challenge → resolution.
+- 2–4 lines of simple dialogue using quotes.
+- Keep most lines ~6–14 Hanzi.
+- Glossary ~6–10 items; only words used in the story.
+- Return JSON ONLY; no commentary.
+"""
+
+HANZI_RE = re.compile(r"[\u4e00-\u9fff]")
+
+def has_hanzi(s: str) -> bool:
+    return bool(HANZI_RE.search(s or ""))
+
+def validate_story_payload(data: dict, min_hanzi_lines: int = 6) -> bool:
+    if not isinstance(data, dict):
+        return False
+    lines = data.get("story", [])
+    if not isinstance(lines, list) or not lines:
+        return False
+    hanzi_count = sum(1 for ln in lines if has_hanzi(ln.get("cn", "")))
+    return hanzi_count >= min_hanzi_lines
 
 def try_generate_story_with_openai(client: OpenAI, lang: str, level_key: str, topic: str, subtopics: List[str],
                                    target_words: int, romanization_on: bool, model: str) -> Optional[Dict]:
@@ -170,16 +226,20 @@ def try_generate_story_with_openai(client: OpenAI, lang: str, level_key: str, to
         if not txt and hasattr(resp, "output") and resp.output and hasattr(resp.output[0], "content"):
             txt = "".join([c.text for c in resp.output[0].content if getattr(c, "type", "") == "output_text"])
         data = json.loads(txt or "{}")
-        if not isinstance(data, dict) or "story" not in data:
-            return None
-        if not romanization_on:
-            for ln in data.get("story", []):
-                ln["romanization"] = ""
-            for g in data.get("glossary", []):
-                g["romanization"] = ""
+        # If romanization is OFF, remove the field entirely to keep PDF clean
+        if not romanization_on and "story" in data:
+            for ln in data["story"]:
+                ln.pop("romanization", None)
         return data
     except Exception:
         return None
+
+def generate_story_with_retries(client: Optional[OpenAI], *, tries=3, **kw) -> Optional[dict]:
+    for _ in range(tries):
+        data = try_generate_story_with_openai(client, **kw) if client else None
+        if data and validate_story_payload(data):
+            return data
+    return None
 
 # =========================
 # ====== TTS (OpenAI) =====
@@ -252,7 +312,7 @@ def register_unicode_font(pdf: FPDF):
         family_added = True
     if not family_added:
         raise RuntimeError(
-            "No Unicode font found. Add a CJK font (e.g., NotoSansSC-Regular.otf/ttf) "
+            "No Unicode font found. Add a CJK font (e.g., NotoSansSC-Regular.ttf/otf) "
             "or a Unicode Latin font (e.g., DejaVuSans.ttf) to fonts/ or set FONT_PATH_* env vars."
         )
 
@@ -260,7 +320,7 @@ def render_pdf(book_title: str, lang: str, level_key: str, stories: List[Dict], 
     pdf = ReaderPDF()
     register_unicode_font(pdf)  # ensure Unicode font before any text ops
 
-    # Soft fallback: if Chinese is selected but no CJK font is loaded, append a warning to the title
+    # Soft fallback title if Chinese selected but no CJK font found
     cjk_required = ("Chinese" in lang or "HSK" in level_key)
     cjk_ok = getattr(pdf, "_has_cjk", False)
     if cjk_required and not cjk_ok:
@@ -381,9 +441,10 @@ with st.sidebar:
     show_romanization = st.toggle("Show pinyin/romanization", value=("HSK1" in level_key or "HSK2" in level_key))
     slow_audio = st.toggle("Add slow audio version", value=False)
 
-    st.subheader("Generation Engines")
-    use_ai_story = st.toggle("Use OpenAI to generate stories (JSON)", value=False)
+    st.subheader("Generation")
+    use_ai_story = st.toggle("Use OpenAI to generate stories (JSON)", value=True)
     text_model = st.text_input("Text model for stories", DEFAULT_TEXT_MODEL)
+    retries = st.slider("LLM retries if no Hanzi", 1, 5, 3)
 
     st.subheader("Audio (TTS)")
     voice = st.text_input("TTS Voice", DEFAULT_TTS_VOICE)
@@ -422,9 +483,16 @@ if build_btn:
             target_words = compute_target_words(idx, n_stories, min_words, max_words, difficulty_ramp)
             story = None
             if use_ai_story and client:
-                story = try_generate_story_with_openai(
-                    client, lang, level_key, topic, subtopics,
-                    target_words, show_romanization, text_model
+                story = generate_story_with_retries(
+                    client,
+                    tries=retries,
+                    lang=lang,
+                    level_key=level_key,
+                    topic=topic,
+                    subtopics=subtopics,
+                    target_words=target_words,
+                    romanization_on=show_romanization,
+                    model=text_model
                 )
             if story is None:
                 story = placeholder_story(lang, level_key, topic, target_words, show_romanization)
@@ -445,8 +513,8 @@ if build_btn:
     else:
         with st.spinner("Synthesizing audio…"):
             for i, s in enumerate(stories, 1):
-                cn_text = " ".join([ln.get("cn","") for ln in s["story"] if ln.get("cn")])
-                if not cn_text.strip():
+                cn_text = " ".join([ln.get("cn","") for ln in s["story"] if ln.get("cn")]).strip()
+                if not cn_text:
                     continue
                 try:
                     audio_bytes = synthesize_tts_mp3(client, cn_text, voice=voice, model=tts_model, fmt=DEFAULT_AUDIO_FORMAT)
