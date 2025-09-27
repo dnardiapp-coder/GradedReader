@@ -14,7 +14,7 @@ from PIL import Image
 from openai import OpenAI
 
 # =========================
-# ====== CONFIG ===========
+# ====== CONFIG ==========
 # =========================
 
 DEFAULT_TTS_MODEL = os.getenv("OPENAI_TTS_MODEL", "gpt-4o-mini-tts")   # or "tts-1"
@@ -34,7 +34,7 @@ MAX_STORIES = 20
 MAX_IMG_WIDTH_PX = 1200
 
 # =========================
-# ====== LEVELS ===========
+# ====== LEVELS ==========
 # =========================
 
 @dataclass
@@ -60,20 +60,28 @@ LEVELS: Dict[str, LevelProfile] = {
 }
 
 # =========================
-# ====== UTILITIES =========
+# ===== UTILITIES =========
 # =========================
 
 def clamp(n: float, lo: float, hi: float) -> float:
     return max(lo, min(n, hi))
 
-def approx_target_lines(target_words: int, avg_words_per_line: int = 10) -> int:
-    return max(3, target_words // avg_words_per_line)
-
 def tokens_len(s: str) -> int:
     return len(s.split())
 
+# A safe multi_cell that always uses the full effective page width (fpdf2: pdf.epw)
+# and resets X to left margin to avoid "Not enough horizontal space" errors.
+
+def mc_full_width(pdf: FPDF, text: str, h: float, font_color: Optional[tuple] = None):
+    if font_color:
+        pdf.set_text_color(*font_color)
+    pdf.set_x(pdf.l_margin)
+    pdf.multi_cell(pdf.epw, h, text)
+    if font_color:
+        pdf.set_text_color(0, 0, 0)
+
 # =========================
-# ====== PLACEHOLDER GEN ===
+# === PLACEHOLDER GEN =====
 # =========================
 
 def placeholder_story(lang: str, level_key: str, topic: str, target_words: int, romanization_on: bool) -> Dict:
@@ -117,7 +125,7 @@ def placeholder_story(lang: str, level_key: str, topic: str, target_words: int, 
     }
 
 # =========================
-# ====== AI GENERATION =====
+# ==== AI GENERATION ======
 # =========================
 
 def build_story_json_system_prompt(lang: str, level: LevelProfile, romanization_on: bool, topic: str, subtopics: List[str], target_words: int) -> str:
@@ -199,7 +207,7 @@ def synthesize_tts_mp3(client: OpenAI, text: str, voice: str, model: str, fmt: s
     raise RuntimeError("Unexpected TTS response; update synthesize_tts_mp3 for your SDK version.")
 
 # =========================
-# ====== IMAGES ===========
+# ======= IMAGES ==========
 # =========================
 
 def resize_for_pdf(im: Image.Image, max_width_px: int = MAX_IMG_WIDTH_PX) -> Image.Image:
@@ -225,7 +233,7 @@ Content guidelines: clear, classroom-friendly, non-violent, inclusive, white/neu
         model=model,
         prompt=prompt,
         size="1024x1024",
-        quality="high"     # FIX: valid values: low|medium|high|auto
+        quality="high"  # valid values: low|medium|high|auto
     )
     b64 = resp.data[0].b64_json
     img_bytes = base64.b64decode(b64)
@@ -239,20 +247,17 @@ class ReaderPDF(FPDF):
     def header(self):
         if hasattr(self, "book_title"):
             self.set_font(PDF_FONT_NAME, "B", 11)
-            # FIX: avoid '•' in headers; use ASCII divider
-            self.cell(0, 8, self.book_title, 0, 1, "R")
+            self.cell(0, 8, self.book_title, ln=1, align="R")
             self.ln(2)
 
     def footer(self):
         self.set_y(-12)
         self.set_font(PDF_FONT_NAME, "", 9)
-        self.cell(0, 8, f"{self.page_no()}", 0, 0, "C")
+        self.cell(0, 8, f"{self.page_no()}", align="C")
+
 
 def register_unicode_font(pdf: FPDF):
-    """
-    Register a single Unicode font family for both Latin and CJK.
-    We prioritize CJK font (covers Chinese) if present; else fallback to Latin.
-    """
+    """Register a Unicode-capable font family. Prefer CJK font if available."""
     family_added = False
     if os.path.exists(FONT_CJK_PATH):
         pdf.add_font(PDF_FONT_NAME, style="", fname=FONT_CJK_PATH, uni=True)
@@ -266,9 +271,10 @@ def register_unicode_font(pdf: FPDF):
         family_added = True
     if not family_added:
         raise RuntimeError(
-            "No Unicode font found. Please add a CJK font (e.g., NotoSansSC-Regular.otf) "
-            "or a Unicode Latin font (e.g., DejaVuSans.ttf) to the fonts/ folder or set FONT_PATH_* env vars."
+            "No Unicode font found. Add a CJK font (e.g., NotoSansSC-Regular.otf/ttf) "
+            "or a Unicode Latin font (e.g., DejaVuSans.ttf) to fonts/ or set FONT_PATH_* env vars."
         )
+
 
 def embed_image_pdf(pdf: FPDF, img_path: str, placement: str):
     page_w = pdf.w - pdf.l_margin - pdf.r_margin
@@ -278,6 +284,9 @@ def embed_image_pdf(pdf: FPDF, img_path: str, placement: str):
     else:
         pdf.image(img_path, x=pdf.l_margin, w=page_w/2)
         pdf.ln(2)
+    # Ensure the next text starts at left margin
+    pdf.set_x(pdf.l_margin)
+
 
 def render_pdf(book_title: str, lang: str, level_key: str, stories: List[Dict], show_romanization: bool,
                image_paths: List[Optional[str]], img_placement: str) -> bytes:
@@ -289,23 +298,24 @@ def render_pdf(book_title: str, lang: str, level_key: str, stories: List[Dict], 
     # Title
     pdf.add_page()
     pdf.set_font(PDF_FONT_NAME, "B", 20)
-    pdf.cell(0, 12, book_title, ln=1)         # ← use ln instead of new_x/new_y
+    pdf.cell(0, 12, book_title, ln=1)
     pdf.set_font(PDF_FONT_NAME, "", 12)
-    pdf.multi_cell(0, 8, f"Language: {lang} - Level: {level_key}")
+    mc_full_width(pdf, f"Language: {lang} - Level: {level_key}", 8)
     pdf.ln(4)
 
     # TOC
     pdf.set_font(PDF_FONT_NAME, "B", 14)
-    pdf.cell(0, 10, "Contents", ln=1)         # ← ln=1
+    pdf.cell(0, 10, "Contents", ln=1)
     pdf.set_font(PDF_FONT_NAME, "", 12)
+    pdf.set_x(pdf.l_margin)
     for i, s in enumerate(stories, 1):
-        pdf.cell(0, 8, f"{i}. {s['title']}", ln=1)  # ← ln=1
+        pdf.cell(0, 8, f"{i}. {s['title']}", ln=1)
 
     # Stories
     for i, story in enumerate(stories, 1):
         pdf.add_page()
         pdf.set_font(PDF_FONT_NAME, "B", 16)
-        pdf.cell(0, 10, f"{i}. {story['title']}", ln=1)  # ← ln=1
+        pdf.cell(0, 10, f"{i}. {story['title']}", ln=1)
         pdf.ln(2)
 
         if image_paths and image_paths[i-1]:
@@ -313,21 +323,17 @@ def render_pdf(book_title: str, lang: str, level_key: str, stories: List[Dict], 
 
         pdf.set_font(PDF_FONT_NAME, "", 12)
         for line in story["story"]:
-            pdf.multi_cell(0, 7, line.get("cn",""))
+            mc_full_width(pdf, line.get("cn",""), 7)
             if show_romanization and line.get("romanization"):
-                pdf.set_text_color(100, 100, 100)
-                pdf.multi_cell(0, 6, line["romanization"])
-                pdf.set_text_color(0, 0, 0)
+                mc_full_width(pdf, line["romanization"], 6, font_color=(100,100,100))
             if line.get("en"):
-                pdf.set_text_color(80, 80, 80)
-                pdf.multi_cell(0, 6, line["en"])
-                pdf.set_text_color(0, 0, 0)
+                mc_full_width(pdf, line["en"], 6, font_color=(80,80,80))
             pdf.ln(1)
 
         if story["glossary"]:
             pdf.ln(2)
             pdf.set_font(PDF_FONT_NAME, "B", 13)
-            pdf.cell(0, 9, "Vocabulary", ln=1)        # ← ln=1
+            pdf.cell(0, 9, "Vocabulary", ln=1)
             pdf.set_font(PDF_FONT_NAME, "", 12)
             for g in story["glossary"]:
                 line = g["term"]
@@ -337,34 +343,34 @@ def render_pdf(book_title: str, lang: str, level_key: str, stories: List[Dict], 
                     line += f" ({g['pos']})"
                 if g.get("en"):
                     line += f": {g['en']}"
-                pdf.multi_cell(0, 6, "- " + line)
+                mc_full_width(pdf, "- " + line, 6)
 
         if story["grammar_note"].get("point"):
             pdf.ln(2)
             pdf.set_font(PDF_FONT_NAME, "B", 13)
-            pdf.cell(0, 9, "Grammar note", ln=1)      # ← ln=1
+            pdf.cell(0, 9, "Grammar note", ln=1)
             pdf.set_font(PDF_FONT_NAME, "", 12)
-            pdf.multi_cell(0, 6, story["grammar_note"]["point"])
+            mc_full_width(pdf, story["grammar_note"]["point"], 6)
             for ex in story["grammar_note"].get("examples", []):
-                pdf.multi_cell(0, 6, f"- {ex}")
+                mc_full_width(pdf, f"- {ex}", 6)
 
         if story["questions"]:
             pdf.ln(2)
             pdf.set_font(PDF_FONT_NAME, "B", 13)
-            pdf.cell(0, 9, "Comprehension", ln=1)     # ← ln=1
+            pdf.cell(0, 9, "Comprehension", ln=1)
             pdf.set_font(PDF_FONT_NAME, "", 12)
             for q in story["questions"]:
                 if q["type"] == "tf":
-                    pdf.multi_cell(0, 6, f"- (T/F) {q['q']}")
+                    mc_full_width(pdf, f"- (T/F) {q['q']}", 6)
                 elif q["type"] == "mc":
-                    pdf.multi_cell(0, 6, f"- {q['q']}")
+                    mc_full_width(pdf, f"- {q['q']}", 6)
                     for opt in q.get("options", []):
-                        pdf.multi_cell(0, 6, f"   * {opt}")
+                        mc_full_width(pdf, f"   * {opt}", 6)
 
     return pdf.output(dest="S").encode("latin1")
 
 # =========================
-# ====== STREAMLIT UI =====
+# ===== STREAMLIT UI ======
 # =========================
 
 st.set_page_config(page_title="Graded Reader Builder (PDF + MP3 + Images)", page_icon="📘", layout="wide")
@@ -373,7 +379,9 @@ st.caption("Create graded readers from beginner to advanced with audio and optio
 
 with st.sidebar:
     st.header("Settings")
-    lang = st.selectbox("Language", ["Chinese (Simplified)", "Spanish", "French", "English", "German", "Portuguese"])
+    lang = st.selectbox("Language", [
+        "Chinese (Simplified)", "Spanish", "French", "English", "German", "Portuguese"
+    ])
     level_key = st.selectbox("Level", list(LEVELS.keys()), index=0)
 
     topic = st.text_input("Topic/Area", "Daily routine")
@@ -481,7 +489,6 @@ if build_btn:
 
     # 3) Render PDF
     with st.spinner("Rendering PDF…"):
-        # ASCII-only title to be safe on any font
         book_title = f"{lang} - {level_key} - {topic}"
         pdf_bytes = render_pdf(book_title, lang, level_key, stories, show_romanization, image_paths, img_placement)
     st.success("Text & PDF ready.")
@@ -511,12 +518,18 @@ if build_btn:
 
     # 5) Vocab export (stub)
     vocab_payload = {"note": "Plug in real vocab extraction if using a lexicon.", "stories": len(stories)}
-    st.download_button("🔤 Export Vocabulary (JSON)", data=json.dumps(vocab_payload, ensure_ascii=False, indent=2).encode("utf-8"),
-                       file_name="vocab.json", mime="application/json")
+    st.download_button(
+        "🔤 Export Vocabulary (JSON)",
+        data=json.dumps(vocab_payload, ensure_ascii=False, indent=2).encode("utf-8"),
+        file_name="vocab.json",
+        mime="application/json",
+    )
 
-st.markdown("""
+st.markdown(
+    """
 **Notes**
-- Place **Unicode fonts** in `fonts/` (`NotoSansSC-Regular.otf` for Chinese, `DejaVuSans.ttf` for Latin).
+- Place **Unicode fonts** in `fonts/` (`NotoSansSC-Regular.otf/ttf` for Chinese, `DejaVuSans.ttf` for Latin). Or set `FONT_PATH_CJK` / `FONT_PATH_LATIN`.
 - Turn on *Use OpenAI to generate stories* for fresh content (JSON mode).
 - Use the difficulty ramp to gradually increase words/story.
-""")
+"""
+)
