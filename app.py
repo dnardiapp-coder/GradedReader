@@ -597,8 +597,45 @@ class AudioGenerator:
 class EnhancedPDF(FPDF):
     def __init__(self, title: str = "", subtitle: str = ""):
         super().__init__()
-        self.title = title
-        self.subtitle = subtitle
+        self.title = self._clean_text(title)
+        self.subtitle = self._clean_text(subtitle)
+        self.add_font('DejaVu', '', FONT_LATIN_PATH if os.path.exists(FONT_LATIN_PATH) else '', uni=True) if os.path.exists(FONT_LATIN_PATH) else None
+        
+    def _clean_text(self, text: str) -> str:
+        """Clean text to remove unsupported characters"""
+        if not text:
+            return ""
+        # Replace special characters with ASCII equivalents
+        replacements = {
+            '•': '-',
+            '▸': '>',
+            '—': '-',
+            '"': '"',
+            '"': '"',
+            ''': "'",
+            ''': "'",
+            '…': '...',
+            '–': '-',
+            '×': 'x',
+            '÷': '/',
+            '≈': '~',
+            '≤': '<=',
+            '≥': '>=',
+            '≠': '!=',
+            '±': '+/-',
+            '°': ' degrees',
+            '™': 'TM',
+            '®': '(R)',
+            '©': '(C)',
+            '€': 'EUR',
+            '£': 'GBP',
+            '¥': 'JPY',
+            '₹': 'INR',
+        }
+        for old, new in replacements.items():
+            text = text.replace(old, new)
+        # Remove any remaining non-ASCII characters for safety
+        return ''.join(char if ord(char) < 128 else '?' for char in text)
         
     def header(self):
         if self.page_no() > 1:  # Skip header on title page
@@ -614,27 +651,27 @@ class EnhancedPDF(FPDF):
     def chapter_title(self, num: int, title: str):
         self.set_font('Arial', 'B', 14)
         self.set_text_color(0, 51, 102)
-        self.cell(0, 10, f'Chapter {num}: {title}', 0, 1, 'L')
+        self.cell(0, 10, self._clean_text(f'Chapter {num}: {title}'), 0, 1, 'L')
         self.set_text_color(0, 0, 0)
         self.ln(4)
         
     def story_paragraph(self, text: str, translation: str = "", romanization: str = ""):
         # Main text
         self.set_font('Arial', '', 11)
-        self.multi_cell(0, 6, text, 0, 'J')
+        self.multi_cell(0, 6, self._clean_text(text), 0, 'J')
         
         # Romanization (if provided)
         if romanization:
             self.set_font('Arial', 'I', 9)
             self.set_text_color(100, 100, 100)
-            self.multi_cell(0, 5, romanization, 0, 'J')
+            self.multi_cell(0, 5, self._clean_text(romanization), 0, 'J')
             self.set_text_color(0, 0, 0)
             
         # Translation (if provided)
         if translation:
             self.set_font('Arial', 'I', 9)
             self.set_text_color(80, 80, 80)
-            self.multi_cell(0, 5, translation, 0, 'J')
+            self.multi_cell(0, 5, self._clean_text(translation), 0, 'J')
             self.set_text_color(0, 0, 0)
             
         self.ln(2)
@@ -650,7 +687,7 @@ class EnhancedPDF(FPDF):
             pos = vocab.get("part_of_speech", "")
             romanization = vocab.get("romanization", "")
             
-            line = f"• {term}"
+            line = f"- {term}"
             if romanization:
                 line += f" [{romanization}]"
             if pos:
@@ -658,7 +695,7 @@ class EnhancedPDF(FPDF):
             if translation:
                 line += f": {translation}"
                 
-            self.multi_cell(0, 5, line, 0, 'L')
+            self.multi_cell(0, 5, self._clean_text(line), 0, 'L')
             
         self.ln(3)
         
@@ -668,15 +705,15 @@ class EnhancedPDF(FPDF):
         
         for point in grammar_points:
             self.set_font('Arial', 'B', 10)
-            self.multi_cell(0, 5, f"▸ {point.get('structure', '')}", 0, 'L')
+            self.multi_cell(0, 5, self._clean_text(f"> {point.get('structure', '')}"), 0, 'L')
             
             self.set_font('Arial', '', 9)
-            self.multi_cell(0, 5, point.get('explanation', ''), 0, 'L')
+            self.multi_cell(0, 5, self._clean_text(point.get('explanation', '')), 0, 'L')
             
             if point.get('examples'):
                 for ex in point['examples']:
                     self.cell(10, 5, '', 0, 0)  # Indent
-                    self.multi_cell(0, 5, f"- {ex}", 0, 'L')
+                    self.multi_cell(0, 5, self._clean_text(f"- {ex}"), 0, 'L')
                     
             self.ln(2)
             
@@ -689,18 +726,18 @@ class EnhancedPDF(FPDF):
             question = q.get('question', '')
             q_english = q.get('question_english', '')
             
-            self.multi_cell(0, 5, f"{i}. {question}", 0, 'L')
+            self.multi_cell(0, 5, self._clean_text(f"{i}. {question}"), 0, 'L')
             if q_english:
                 self.set_font('Arial', 'I', 9)
                 self.set_text_color(100, 100, 100)
-                self.multi_cell(0, 5, f"   ({q_english})", 0, 'L')
+                self.multi_cell(0, 5, self._clean_text(f"   ({q_english})"), 0, 'L')
                 self.set_text_color(0, 0, 0)
                 self.set_font('Arial', '', 10)
                 
             if q.get('type') == 'multiple_choice' and q.get('options'):
                 for opt in q['options']:
                     self.cell(10, 5, '', 0, 0)  # Indent
-                    self.cell(0, 5, f"   {opt}", 0, 1)
+                    self.cell(0, 5, self._clean_text(f"   {opt}"), 0, 1)
                     
             self.ln(2)
 
@@ -719,9 +756,9 @@ def create_enhanced_pdf(
     
     # Title page
     pdf.set_font('Arial', 'B', 24)
-    pdf.cell(0, 20, book_title, 0, 1, 'C')
+    pdf.cell(0, 20, pdf._clean_text(book_title), 0, 1, 'C')
     pdf.set_font('Arial', '', 14)
-    pdf.cell(0, 10, f"{language.value} - {level.value}", 0, 1, 'C')
+    pdf.cell(0, 10, pdf._clean_text(f"{language.value} - {level.value}"), 0, 1, 'C')
     pdf.cell(0, 10, f"CEFR Level: {LEVEL_PROFILES[level].cefr_level}", 0, 1, 'C')
     pdf.ln(20)
     
@@ -734,13 +771,13 @@ def create_enhanced_pdf(
     intro_text = """This graded reader has been carefully designed to match your language learning level. 
     
 Each story includes:
-• Main text in the target language
-• Optional romanization for pronunciation support
-• English translations for comprehension
-• Key vocabulary with definitions
-• Grammar explanations with examples
-• Comprehension questions to test understanding
-• Audio files for listening practice
+- Main text in the target language
+- Optional romanization for pronunciation support
+- English translations for comprehension
+- Key vocabulary with definitions
+- Grammar explanations with examples
+- Comprehension questions to test understanding
+- Audio files for listening practice
 
 Learning Tips:
 1. First, listen to the audio without reading
@@ -769,11 +806,11 @@ If you understand everything easily, try the next level up!"""
     
     pdf.set_font('Arial', '', 11)
     for num, title, trans, page in toc_entries:
-        pdf.cell(0, 8, f"{num}. {title}", 0, 1)
+        pdf.cell(0, 8, pdf._clean_text(f"{num}. {title}"), 0, 1)
         if trans:
             pdf.set_font('Arial', 'I', 9)
             pdf.set_text_color(100, 100, 100)
-            pdf.cell(0, 6, f"    {trans}", 0, 1)
+            pdf.cell(0, 6, pdf._clean_text(f"    {trans}"), 0, 1)
             pdf.set_text_color(0, 0, 0)
             pdf.set_font('Arial', '', 11)
     
@@ -787,7 +824,7 @@ If you understand everything easily, try the next level up!"""
         # Story metadata
         if story.get('summary'):
             pdf.set_font('Arial', 'I', 10)
-            pdf.multi_cell(0, 5, story['summary'], 0, 'J')
+            pdf.multi_cell(0, 5, pdf._clean_text(story['summary']), 0, 'J')
             pdf.ln(3)
             
         # Story content
@@ -817,9 +854,9 @@ If you understand everything easily, try the next level up!"""
             pdf.set_font('Arial', '', 10)
             for note in story['cultural_notes']:
                 pdf.set_font('Arial', 'B', 10)
-                pdf.cell(0, 5, f"• {note.get('topic', '')}", 0, 1)
+                pdf.cell(0, 5, pdf._clean_text(f"- {note.get('topic', '')}"), 0, 1)
                 pdf.set_font('Arial', '', 9)
-                pdf.multi_cell(0, 5, note.get('explanation', ''), 0, 'J')
+                pdf.multi_cell(0, 5, pdf._clean_text(note.get('explanation', '')), 0, 'J')
                 pdf.ln(2)
         
         # Discussion prompts
@@ -828,7 +865,7 @@ If you understand everything easily, try the next level up!"""
             pdf.cell(0, 10, 'Discussion Questions', 0, 1, 'L')
             pdf.set_font('Arial', '', 10)
             for j, prompt in enumerate(story['discussion_prompts'], 1):
-                pdf.multi_cell(0, 5, f"{j}. {prompt}", 0, 'L')
+                pdf.multi_cell(0, 5, pdf._clean_text(f"{j}. {prompt}"), 0, 'L')
                 pdf.ln(1)
     
     # Answer key (if available)
@@ -840,17 +877,17 @@ If you understand everything easily, try the next level up!"""
     for i, story in enumerate(stories, 1):
         if story.get('comprehension_questions'):
             pdf.set_font('Arial', 'B', 12)
-            pdf.cell(0, 8, f"Chapter {i}: {story.get('title', '')}", 0, 1)
+            pdf.cell(0, 8, pdf._clean_text(f"Chapter {i}: {story.get('title', '')}"), 0, 1)
             pdf.set_font('Arial', '', 10)
             
             for j, q in enumerate(story['comprehension_questions'], 1):
                 answer = q.get('answer', 'N/A')
                 explanation = q.get('explanation', '')
-                pdf.cell(0, 5, f"{j}. {answer}", 0, 1)
+                pdf.cell(0, 5, pdf._clean_text(f"{j}. {answer}"), 0, 1)
                 if explanation:
                     pdf.set_font('Arial', 'I', 9)
                     pdf.cell(10, 5, '', 0, 0)  # Indent
-                    pdf.multi_cell(0, 4, explanation, 0, 'L')
+                    pdf.multi_cell(0, 4, pdf._clean_text(explanation), 0, 'L')
                     pdf.set_font('Arial', '', 10)
             pdf.ln(2)
     
