@@ -1,11 +1,10 @@
-# Python
 __pycache__/
 *.pyc
 .venv/
 .env
 .env.*
-# Streamlit
 .streamlit/
+
 # Artifacts
 *.pdf
 *.zip
@@ -15,6 +14,7 @@ __pycache__/
 *.png
 *.jpg
 *.jpeg
-# OS/editor junk
+
+# OS/editor
 .DS_Store
 Thumbs.db
