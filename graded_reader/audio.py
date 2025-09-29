@@ -18,25 +18,16 @@ class AudioGenerator:
         self.voice = voice
 
     def generate_audio_bundle(self, story: StoryPackage, speed: float = 1.0) -> Dict[str, bytes]:
-        """Create audio files for the full story and each paragraph."""
+        """Create a single audio file narrating the entire story."""
 
         if not self.client:
             return {}
-
-        audio_files: Dict[str, bytes] = {}
 
         full_text = story.primary_text.strip()
         if not full_text:
             return {}
 
-        audio_files["story_full.mp3"] = self._synthesize_audio(full_text, speed=speed)
-
-        for paragraph in story.story:
-            if paragraph.text.strip():
-                filename = f"paragraph_{paragraph.paragraph_id:02d}.mp3"
-                audio_files[filename] = self._synthesize_audio(paragraph.text, speed=speed)
-
-        return audio_files
+        return {"story_full.mp3": self._synthesize_audio(full_text, speed=speed)}
 
     # ------------------------------------------------------------------
     def _synthesize_audio(self, text: str, speed: float = 1.0) -> bytes:

@@ -198,12 +198,14 @@ def main() -> None:
         voice = st.text_input("Voice (TTS)", value=config.DEFAULT_TTS_VOICE)
         speech_speed = st.slider("Narration speed", 0.8, 1.2, 1.0, 0.05)
         temperature = st.slider("Creativity", 0.0, 1.0, 0.7, 0.05)
-        story_count = st.slider(
-            "Number of stories",
-            1,
-            3,
-            1,
-            help="Generate multiple variants with the same settings.",
+        story_count = int(
+            st.slider(
+                "Number of stories",
+                1,
+                3,
+                1,
+                help="Generate multiple variants with the same settings.",
+            )
         )
 
     if st.button("Generate reader", type="primary"):
