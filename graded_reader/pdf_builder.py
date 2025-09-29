@@ -23,22 +23,34 @@ class ReaderPDF(FPDF):
         super().__init__(format="A4")
         self.title = title
         self.subtitle = subtitle
+        self.primary_font = "Helvetica"
+        self.fallback_font = "Helvetica"
+        self.has_custom_font = False
         self.set_auto_page_break(auto=True, margin=MARGIN)
         self.set_margins(MARGIN, MARGIN, MARGIN)
 
     def header(self) -> None:  # noqa: D401 - FPDF API
-        self.set_font("Helvetica", "B", 14)
+        if self.has_custom_font:
+            self.set_font(self.primary_font, size=14)
+        else:
+            self.set_font(self.fallback_font, "B", 14)
         self.set_text_color(30, 30, 30)
         self.cell(0, 10, self.title, ln=True, align="C")
         if self.subtitle:
-            self.set_font("Helvetica", size=9)
+            if self.has_custom_font:
+                self.set_font(self.primary_font, size=9)
+            else:
+                self.set_font(self.fallback_font, size=9)
             self.set_text_color(90, 90, 90)
             self.cell(0, 6, self.subtitle, ln=True, align="C")
         self.ln(4)
 
     def footer(self) -> None:  # noqa: D401 - FPDF API
         self.set_y(-15)
-        self.set_font("Helvetica", size=8)
+        if self.has_custom_font:
+            self.set_font(self.primary_font, size=8)
+        else:
+            self.set_font(self.fallback_font, size=8)
         self.set_text_color(140, 140, 140)
         self.cell(0, 10, f"Page {self.page_no()}", align="C")
 
@@ -72,24 +84,31 @@ class PDFBuilder:
     def _register_fonts(self, pdf: FPDF) -> None:
         font_path = self.language_config.font_path
         if font_path and os.path.exists(font_path):
-            pdf.add_font(self.primary_font, "", font_path, uni=True)
+            for style in ("", "B", "I", "BI"):
+                pdf.add_font(self.primary_font, style, font_path, uni=True)
             self._has_custom_font = True
+            pdf.primary_font = self.primary_font
+            pdf.fallback_font = "Helvetica"
+            pdf.has_custom_font = True
             pdf.set_font(self.primary_font, size=12)
         else:
             self.primary_font = "Helvetica"
+            pdf.primary_font = self.primary_font
+            pdf.fallback_font = "Helvetica"
+            pdf.has_custom_font = False
             pdf.set_font(self.primary_font, size=12)
 
     def _set_font(self, pdf: FPDF, size: int, style: str = "") -> None:
         """Apply either the custom typeface or a safe fallback."""
 
-        if self._has_custom_font and style == "":
-            pdf.set_font(self.primary_font, style=style, size=size)
+        if self._has_custom_font:
+            try:
+                pdf.set_font(self.primary_font, style=style, size=size)
+            except RuntimeError:
+                pdf.set_font(self.primary_font, size=size)
             return
 
-        # Bold/italic variants are not guaranteed for custom fonts, so fall back
-        # to built-in Helvetica when a styled variant is requested or the custom
-        # font is unavailable.
-        pdf.set_font("Helvetica", style=style, size=size)
+        pdf.set_font(self.primary_font, style=style, size=size)
 
     def _multi_cell(self, pdf: FPDF, w: float, h: float, text: str, **kwargs) -> None:
         """Wrapper around :meth:`FPDF.multi_cell` that resets X to the margin."""
