@@ -5,6 +5,7 @@ import os
 from typing import Callable
 
 from fpdf import FPDF
+from fpdf.enums import XPos
 
 from . import config
 from .data import LANGUAGE_CONFIGS
@@ -23,6 +24,7 @@ class ReaderPDF(FPDF):
         self.title = title
         self.subtitle = subtitle
         self.set_auto_page_break(auto=True, margin=MARGIN)
+        self.set_margins(MARGIN, MARGIN, MARGIN)
 
     def header(self) -> None:  # noqa: D401 - FPDF API
         self.set_font("Helvetica", "B", 14)
@@ -61,7 +63,10 @@ class PDFBuilder:
         self._write_grammar(pdf, story)
         self._write_questions(pdf, story)
         self._write_extras(pdf, story)
-        return pdf.output(dest="S").encode("latin1")
+        output = pdf.output(dest="S")
+        if isinstance(output, str):
+            return output.encode("latin1")
+        return bytes(output)
 
     # ------------------------------------------------------------------
     def _register_fonts(self, pdf: FPDF) -> None:
@@ -75,8 +80,22 @@ class PDFBuilder:
             pdf.set_font(self.primary_font, size=12)
 
     def _set_font(self, pdf: FPDF, size: int, style: str = "") -> None:
-        font_name = self.primary_font if self._has_custom_font else "Helvetica"
-        pdf.set_font(font_name, style=style, size=size)
+        """Apply either the custom typeface or a safe fallback."""
+
+        if self._has_custom_font and style == "":
+            pdf.set_font(self.primary_font, style=style, size=size)
+            return
+
+        # Bold/italic variants are not guaranteed for custom fonts, so fall back
+        # to built-in Helvetica when a styled variant is requested or the custom
+        # font is unavailable.
+        pdf.set_font("Helvetica", style=style, size=size)
+
+    def _multi_cell(self, pdf: FPDF, w: float, h: float, text: str, **kwargs) -> None:
+        """Wrapper around :meth:`FPDF.multi_cell` that resets X to the margin."""
+
+        kwargs.setdefault("new_x", XPos.LMARGIN)
+        pdf.multi_cell(w, h, text, **kwargs)
 
     def _write_section(self, pdf: ReaderPDF, title: str, body: Callable[[], None]) -> None:
         pdf.add_page()
@@ -90,11 +109,11 @@ class PDFBuilder:
     def _write_cover(self, pdf: ReaderPDF, story: StoryPackage) -> None:
         self._set_font(pdf, 22, "B")
         pdf.set_text_color(15, 15, 15)
-        pdf.multi_cell(0, LINE_HEIGHT + 4, story.title, align="C")
+        self._multi_cell(pdf, 0, LINE_HEIGHT + 4, story.title, align="C")
         if story.title_translated:
             self._set_font(pdf, 12)
             pdf.set_text_color(90, 90, 90)
-            pdf.multi_cell(0, LINE_HEIGHT, story.title_translated, align="C")
+            self._multi_cell(pdf, 0, LINE_HEIGHT, story.title_translated, align="C")
         pdf.ln(SECTION_SPACING)
 
     def _write_summary(self, pdf: ReaderPDF, story: StoryPackage) -> None:
@@ -102,14 +121,14 @@ class PDFBuilder:
         pdf.set_text_color(25, 25, 25)
         pdf.cell(0, LINE_HEIGHT, "Overview", ln=True)
         self._set_font(pdf, 11)
-        pdf.multi_cell(0, LINE_HEIGHT, story.summary or "Summary unavailable.")
+        self._multi_cell(pdf, 0, LINE_HEIGHT, story.summary or "Summary unavailable.")
         pdf.ln(2)
         meta = (
             f"Level: {story.level.value}  |  Difficulty: {story.difficulty_score:.2f}  |  "
             f"Estimated reading time: {story.estimated_reading_time} min"
         )
         pdf.set_text_color(100, 100, 100)
-        pdf.set_font("Helvetica", size=9)
+        self._set_font(pdf, 9)
         pdf.cell(0, LINE_HEIGHT, meta, ln=True)
         pdf.ln(SECTION_SPACING)
 
@@ -121,15 +140,20 @@ class PDFBuilder:
         for paragraph in story.story:
             self._set_font(pdf, 12)
             pdf.set_text_color(35, 35, 35)
-            pdf.multi_cell(0, LINE_HEIGHT, paragraph.text)
+            self._multi_cell(pdf, 0, LINE_HEIGHT, paragraph.text)
             if paragraph.romanization:
-                pdf.set_font("Helvetica", size=9)
+                self._set_font(pdf, 9)
                 pdf.set_text_color(120, 120, 120)
-                pdf.multi_cell(0, LINE_HEIGHT - 1, f"{self.language_config.romanization_name}: {paragraph.romanization}")
+                self._multi_cell(
+                    pdf,
+                    0,
+                    LINE_HEIGHT - 1,
+                    f"{self.language_config.romanization_name}: {paragraph.romanization}",
+                )
             if paragraph.translation:
-                pdf.set_font("Helvetica", size=9)
+                self._set_font(pdf, 9)
                 pdf.set_text_color(90, 90, 90)
-                pdf.multi_cell(0, LINE_HEIGHT - 1, f"EN: {paragraph.translation}")
+                self._multi_cell(pdf, 0, LINE_HEIGHT - 1, f"EN: {paragraph.translation}")
             pdf.ln(1)
         pdf.ln(SECTION_SPACING)
 
@@ -146,11 +170,11 @@ class PDFBuilder:
                     line += f" ({entry.romanization})"
                 if entry.translation:
                     line += f" – {entry.translation}"
-                pdf.multi_cell(0, LINE_HEIGHT, line)
+                self._multi_cell(pdf, 0, LINE_HEIGHT, line)
                 if entry.example:
-                    pdf.set_font("Helvetica", size=9)
+                    self._set_font(pdf, 9)
                     pdf.set_text_color(120, 120, 120)
-                    pdf.multi_cell(0, LINE_HEIGHT - 1, f"Example: {entry.example}")
+                    self._multi_cell(pdf, 0, LINE_HEIGHT - 1, f"Example: {entry.example}")
                     self._set_font(pdf, 11)
                     pdf.set_text_color(30, 30, 30)
                 pdf.ln(1)
@@ -165,17 +189,17 @@ class PDFBuilder:
             for point in story.grammar_points:
                 self._set_font(pdf, 12, "B")
                 pdf.set_text_color(25, 25, 25)
-                pdf.multi_cell(0, LINE_HEIGHT, point.structure)
+                self._multi_cell(pdf, 0, LINE_HEIGHT, point.structure)
                 self._set_font(pdf, 11)
-                pdf.multi_cell(0, LINE_HEIGHT, point.explanation)
+                self._multi_cell(pdf, 0, LINE_HEIGHT, point.explanation)
                 for example in point.examples:
-                    pdf.set_font("Helvetica", size=9)
+                    self._set_font(pdf, 9)
                     pdf.set_text_color(120, 120, 120)
-                    pdf.multi_cell(0, LINE_HEIGHT - 1, f"Example: {example}")
+                    self._multi_cell(pdf, 0, LINE_HEIGHT - 1, f"Example: {example}")
                 if point.practice:
-                    pdf.set_font("Helvetica", size=9)
+                    self._set_font(pdf, 9)
                     pdf.set_text_color(110, 110, 110)
-                    pdf.multi_cell(0, LINE_HEIGHT - 1, f"Try: {point.practice}")
+                    self._multi_cell(pdf, 0, LINE_HEIGHT - 1, f"Try: {point.practice}")
                 pdf.ln(1)
 
         self._write_section(pdf, "Grammar Focus", body)
@@ -188,27 +212,32 @@ class PDFBuilder:
             self._set_font(pdf, 11)
             for idx, question in enumerate(story.comprehension_questions, start=1):
                 pdf.set_text_color(30, 30, 30)
-                pdf.multi_cell(0, LINE_HEIGHT, f"{idx}. {question.question}")
+                self._multi_cell(pdf, 0, LINE_HEIGHT, f"{idx}. {question.question}")
                 if question.question_english:
-                    pdf.set_font("Helvetica", size=9)
+                    self._set_font(pdf, 9)
                     pdf.set_text_color(120, 120, 120)
-                    pdf.multi_cell(0, LINE_HEIGHT - 1, f"EN: {question.question_english}")
+                    self._multi_cell(
+                        pdf,
+                        0,
+                        LINE_HEIGHT - 1,
+                        f"EN: {question.question_english}",
+                    )
                     self._set_font(pdf, 11)
                 if question.options:
-                    pdf.set_font("Helvetica", size=9)
+                    self._set_font(pdf, 9)
                     pdf.set_text_color(90, 90, 90)
                     for option in question.options:
-                        pdf.multi_cell(0, LINE_HEIGHT - 1, f"• {option}")
+                        self._multi_cell(pdf, 0, LINE_HEIGHT - 1, f"- {option}")
                     self._set_font(pdf, 11)
                 if question.answer:
-                    pdf.set_font("Helvetica", size=9)
+                    self._set_font(pdf, 9)
                     pdf.set_text_color(70, 120, 70)
-                    pdf.multi_cell(0, LINE_HEIGHT - 1, f"Answer: {question.answer}")
+                    self._multi_cell(pdf, 0, LINE_HEIGHT - 1, f"Answer: {question.answer}")
                     self._set_font(pdf, 11)
                 if question.explanation:
-                    pdf.set_font("Helvetica", size=9)
+                    self._set_font(pdf, 9)
                     pdf.set_text_color(120, 120, 120)
-                    pdf.multi_cell(0, LINE_HEIGHT - 1, f"Why: {question.explanation}")
+                    self._multi_cell(pdf, 0, LINE_HEIGHT - 1, f"Why: {question.explanation}")
                     self._set_font(pdf, 11)
                 pdf.ln(1)
 
@@ -222,7 +251,7 @@ class PDFBuilder:
                 for note in story.cultural_notes:
                     topic = note.get("topic", "")
                     explanation = note.get("explanation", "")
-                    pdf.multi_cell(0, LINE_HEIGHT, f"{topic}: {explanation}".strip())
+                    self._multi_cell(pdf, 0, LINE_HEIGHT, f"{topic}: {explanation}".strip())
                     pdf.ln(1)
 
             self._write_section(pdf, "Cultural Notes", body_notes)
@@ -232,7 +261,7 @@ class PDFBuilder:
                 self._set_font(pdf, 11)
                 pdf.set_text_color(30, 30, 30)
                 for prompt in story.discussion_prompts:
-                    pdf.multi_cell(0, LINE_HEIGHT, f"• {prompt}")
+                    self._multi_cell(pdf, 0, LINE_HEIGHT, f"- {prompt}")
                     pdf.ln(0.5)
 
             self._write_section(pdf, "Discussion Prompts", body_discussion)
@@ -243,18 +272,18 @@ class PDFBuilder:
                 pdf.set_text_color(30, 30, 30)
                 for task in story.writing_tasks:
                     prompt = task.get("prompt", "")
-                    pdf.multi_cell(0, LINE_HEIGHT, f"Prompt: {prompt}")
+                    self._multi_cell(pdf, 0, LINE_HEIGHT, f"Prompt: {prompt}")
                     word_limit = task.get("word_limit")
                     if word_limit:
-                        pdf.set_font("Helvetica", size=9)
+                        self._set_font(pdf, 9)
                         pdf.set_text_color(120, 120, 120)
-                        pdf.multi_cell(0, LINE_HEIGHT - 1, f"Word limit: {word_limit}")
+                        self._multi_cell(pdf, 0, LINE_HEIGHT - 1, f"Word limit: {word_limit}")
                         self._set_font(pdf, 11)
                     focus = task.get("focus")
                     if focus:
-                        pdf.set_font("Helvetica", size=9)
+                        self._set_font(pdf, 9)
                         pdf.set_text_color(120, 120, 120)
-                        pdf.multi_cell(0, LINE_HEIGHT - 1, f"Focus: {focus}")
+                        self._multi_cell(pdf, 0, LINE_HEIGHT - 1, f"Focus: {focus}")
                         self._set_font(pdf, 11)
                     pdf.ln(1)
 
