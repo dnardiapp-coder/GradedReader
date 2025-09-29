@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import io
 import os
+import re
 import zipfile
 from typing import Optional
 
@@ -20,14 +21,22 @@ from graded_reader.pdf_builder import PDFBuilder
 def _get_openai_client() -> Optional[OpenAI]:
     """Return an OpenAI client if credentials are available."""
 
-    api_key = os.getenv("OPENAI_API_KEY") or st.secrets.get("OPENAI_API_KEY", "")
+    api_key = os.getenv("OPENAI_API_KEY", "")
+
+    # Streamlit secrets may store the key at the root or within an "openai" mapping.
+    if not api_key:
+        api_key = st.secrets.get("OPENAI_API_KEY", "")
+    if not api_key and "openai" in st.secrets:
+        api_key = st.secrets["openai"].get("api_key", "")
+
     if not api_key:
         return None
     return OpenAI(api_key=api_key)
 
 
-def _render_story(story: StoryPackage) -> None:
-    st.header(story.title)
+def _render_story(story: StoryPackage, *, heading_level: str = "header") -> None:
+    heading_func = getattr(st, heading_level, st.header)
+    heading_func(story.title)
     if story.title_translated:
         st.caption(story.title_translated)
 
@@ -120,6 +129,11 @@ def main() -> None:
         "Create pedagogically rich graded readers complete with printable PDFs and audio narration."
     )
 
+    if "generated_stories" not in st.session_state:
+        st.session_state.generated_stories = []
+    if "generation_error" not in st.session_state:
+        st.session_state.generation_error = None
+
     with st.sidebar:
         st.header("Reader Settings")
         language = st.selectbox(
@@ -139,12 +153,28 @@ def main() -> None:
         )
 
         available_topics = LEVEL_PROFILES[level].themes
-        topic = st.text_input("Theme or topic", value=available_topics[0] if available_topics else "")
+        topic = st.text_input(
+            "Theme or topic",
+            value=available_topics[0] if available_topics else "",
+            help="Describe the main focus for the story in your own words.",
+        ).strip()
         subtopic_options = st.multiselect(
             "Additional themes",
             available_topics,
             default=available_topics[:2],
         )
+
+        custom_subtopic_text = st.text_area(
+            "Custom themes",
+            placeholder="Enter additional themes, separated by commas or new lines.",
+            help="Use this to guide the AI beyond the suggested themes.",
+        )
+        custom_subtopics = [
+            item.strip()
+            for item in re.split(r"[\n,]", custom_subtopic_text)
+            if item.strip()
+        ]
+        subtopics_combined = list(dict.fromkeys(subtopic_options + custom_subtopics))
 
         structure_options = [
             key for key, structure in STORY_STRUCTURES.items() if level in structure.suitable_levels
@@ -168,48 +198,88 @@ def main() -> None:
         voice = st.text_input("Voice (TTS)", value=config.DEFAULT_TTS_VOICE)
         speech_speed = st.slider("Narration speed", 0.8, 1.2, 1.0, 0.05)
         temperature = st.slider("Creativity", 0.0, 1.0, 0.7, 0.05)
-
-    if st.button("Generate reader", type="primary"):
-        with st.spinner("Crafting your graded reader..."):
-            client = _get_openai_client()
-            story_generator = StoryGenerator(client)
-            story = story_generator.generate_story(
-                language=language,
-                level=level,
-                topic=topic,
-                subtopics=subtopic_options,
-                structure_key=structure_key,
-                story_length=length_choice.target_words,
-                features=features,
-                temperature=temperature,
-            )
-
-            pdf_builder = PDFBuilder(language)
-            pdf_bytes = pdf_builder.build(story)
-
-            audio_generator = AudioGenerator(client, voice=voice)
-            audio_files = audio_generator.generate_audio_bundle(story, speed=speech_speed)
-            audio_zip = _prepare_audio_zip(audio_files)
-
-        st.success("Reader ready!")
-        _render_story(story)
-
-        st.download_button(
-            "Download PDF",
-            data=pdf_bytes,
-            file_name=f"{story.title}_graded_reader.pdf",
-            mime="application/pdf",
+        story_count = st.slider(
+            "Number of stories",
+            1,
+            3,
+            1,
+            help="Generate multiple variants with the same settings.",
         )
 
-        if audio_zip:
-            st.download_button(
-                "Download audio bundle",
-                data=audio_zip,
-                file_name=f"{story.title}_audio.zip",
-                mime="application/zip",
-            )
+    if st.button("Generate reader", type="primary"):
+        st.session_state.generated_stories = []
+        st.session_state.generation_error = None
+
+        with st.spinner("Crafting your graded reader(s)..."):
+            try:
+                client = _get_openai_client()
+                story_generator = StoryGenerator(client)
+                pdf_builder = PDFBuilder(language)
+                audio_generator = AudioGenerator(client, voice=voice)
+
+                stories = []
+                for _ in range(story_count):
+                    story = story_generator.generate_story(
+                        language=language,
+                        level=level,
+                        topic=topic or (available_topics[0] if available_topics else "General interest"),
+                        subtopics=subtopics_combined,
+                        structure_key=structure_key,
+                        story_length=length_choice.target_words,
+                        features=features,
+                        temperature=temperature,
+                    )
+
+                    pdf_bytes = pdf_builder.build(story)
+                    audio_files = audio_generator.generate_audio_bundle(story, speed=speech_speed)
+                    audio_zip = _prepare_audio_zip(audio_files)
+
+                    stories.append(
+                        {
+                            "story": story,
+                            "pdf_bytes": pdf_bytes,
+                            "audio_zip": audio_zip,
+                        }
+                    )
+
+                st.session_state.generated_stories = stories
+            except Exception as exc:
+                st.session_state.generation_error = str(exc)
+
+    if st.session_state.generation_error:
+        st.error(f"Generation failed: {st.session_state.generation_error}")
+
+    if st.session_state.generated_stories:
+        if len(st.session_state.generated_stories) == 1:
+            st.success("Reader ready!")
         else:
-            st.info("Provide an OpenAI API key to enable audio narration exports.")
+            st.success("Readers ready! Explore each version below.")
+
+        for idx, package in enumerate(st.session_state.generated_stories, start=1):
+            if idx > 1:
+                st.divider()
+
+            heading_level = "header" if idx == 1 else "subheader"
+            _render_story(package["story"], heading_level=heading_level)
+
+            st.download_button(
+                "Download PDF",
+                data=package["pdf_bytes"],
+                file_name=f"{package['story'].title}_graded_reader.pdf",
+                mime="application/pdf",
+                key=f"pdf-download-{idx}",
+            )
+
+            if package["audio_zip"]:
+                st.download_button(
+                    "Download audio bundle",
+                    data=package["audio_zip"],
+                    file_name=f"{package['story'].title}_audio.zip",
+                    mime="application/zip",
+                    key=f"audio-download-{idx}",
+                )
+            elif idx == 1:
+                st.info("Provide an OpenAI API key to enable audio narration exports.")
 
     st.caption(
         "Tip: set the OPENAI_API_KEY environment variable or add it to Streamlit secrets to unlock full AI generation."
